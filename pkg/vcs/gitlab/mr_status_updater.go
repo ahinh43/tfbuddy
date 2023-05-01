@@ -1,55 +1,60 @@
 package gitlab
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/hashicorp/go-tfe"
 	"github.com/rs/zerolog/log"
 	gogitlab "github.com/xanzy/go-gitlab"
 	"github.com/zapier/tfbuddy/pkg/runstream"
+	"go.opentelemetry.io/otel"
 )
 
-func (p *RunStatusUpdater) updateCommitStatusForRun(run *tfe.Run, rmd runstream.RunMetadata) {
+func (p *RunStatusUpdater) updateCommitStatusForRun(ctx context.Context, run *tfe.Run, rmd runstream.RunMetadata) {
+	ctx, span := otel.Tracer("TFC").Start(ctx, "updateCommitStatusForRun")
+	defer span.End()
+
 	switch run.Status {
 	// https://www.terraform.io/cloud-docs/api-docs/run#run-states
 	case tfe.RunPending:
 		// The initial status of a run once it has been created.
 		if rmd.GetAction() == "plan" {
-			p.updateStatus(gogitlab.Pending, "plan", rmd)
-			p.updateStatus(gogitlab.Failed, "apply", rmd)
+			p.updateStatus(ctx, gogitlab.Pending, "plan", rmd)
+			p.updateStatus(ctx, gogitlab.Failed, "apply", rmd)
 		} else {
-			p.updateStatus(gogitlab.Pending, "apply", rmd)
+			p.updateStatus(ctx, gogitlab.Pending, "apply", rmd)
 		}
 
 	case tfe.RunApplyQueued:
 		// Once the changes in the plan have been confirmed, the run run will transition to apply_queued.
 		// This status indicates that the run should start as soon as the backend services have available capacity.
-		p.updateStatus(gogitlab.Pending, "apply", rmd)
+		p.updateStatus(ctx, gogitlab.Pending, "apply", rmd)
 
 	case tfe.RunApplying:
 		// The applying phase of a run is in progress.
-		p.updateStatus(gogitlab.Running, "apply", rmd)
+		p.updateStatus(ctx, gogitlab.Running, "apply", rmd)
 
 	case tfe.RunApplied:
 		// The applying phase of a run has completed.
-		p.updateStatus(gogitlab.Success, "apply", rmd)
+		p.updateStatus(ctx, gogitlab.Success, "apply", rmd)
 
 	case tfe.RunCanceled:
 		// The run has been discarded. This is a final state.
-		p.updateStatus(gogitlab.Failed, rmd.GetAction(), rmd)
+		p.updateStatus(ctx, gogitlab.Failed, rmd.GetAction(), rmd)
 
 	case tfe.RunDiscarded:
 		// The run has been discarded. This is a final state.
-		p.updateStatus(gogitlab.Failed, "plan", rmd)
-		p.updateStatus(gogitlab.Failed, "apply", rmd)
+		p.updateStatus(ctx, gogitlab.Failed, "plan", rmd)
+		p.updateStatus(ctx, gogitlab.Failed, "apply", rmd)
 
 	case tfe.RunErrored:
 		// The run has errored. This is a final state.
-		p.updateStatus(gogitlab.Failed, rmd.GetAction(), rmd)
+		p.updateStatus(ctx, gogitlab.Failed, rmd.GetAction(), rmd)
 
 	case tfe.RunPlanning:
 		// The planning phase of a run is in progress.
-		p.updateStatus(gogitlab.Running, rmd.GetAction(), rmd)
+		p.updateStatus(ctx, gogitlab.Running, rmd.GetAction(), rmd)
 
 	case tfe.RunPlanned:
 		// this status is for Apply runs (as opposed to `RunPlannedAndFinished` below, so don't update the status.
@@ -58,16 +63,16 @@ func (p *RunStatusUpdater) updateCommitStatusForRun(run *tfe.Run, rmd runstream.
 	case tfe.RunPlannedAndFinished:
 		// The completion of a run containing a plan only, or a run the produces a plan with no changes to apply.
 		// This is a final state.
-		p.updateStatus(gogitlab.Success, rmd.GetAction(), rmd)
+		p.updateStatus(ctx, gogitlab.Success, rmd.GetAction(), rmd)
 		if run.HasChanges {
 			// TODO: is pending enough to block merging before apply?
-			p.updateStatus(gogitlab.Pending, "apply", rmd)
+			p.updateStatus(ctx, gogitlab.Pending, "apply", rmd)
 		}
 
 	case tfe.RunPolicySoftFailed:
 		// A sentinel policy has soft failed for a plan-only run. This is a final state.
 		// During the apply, the policy failure will need to be overriden.
-		p.updateStatus(gogitlab.Success, rmd.GetAction(), rmd)
+		p.updateStatus(ctx, gogitlab.Success, rmd.GetAction(), rmd)
 
 	case tfe.RunPolicyChecked:
 		// The sentinel policy checking phase of a run has completed.
@@ -81,18 +86,22 @@ func (p *RunStatusUpdater) updateCommitStatusForRun(run *tfe.Run, rmd runstream.
 
 }
 
-func (p *RunStatusUpdater) updateStatus(state gogitlab.BuildStateValue, action string, rmd runstream.RunMetadata) {
+func (p *RunStatusUpdater) updateStatus(ctx context.Context, state gogitlab.BuildStateValue, action string, rmd runstream.RunMetadata) {
+	ctx, span := otel.Tracer("TFC").Start(ctx, "updateStatus")
+	defer span.End()
+
 	status := &gogitlab.SetCommitStatusOptions{
 		Name:        statusName(rmd.GetWorkspace(), action),
 		Context:     statusName(rmd.GetWorkspace(), action),
 		TargetURL:   runUrlForTFRunMetadata(rmd),
 		Description: descriptionForState(state),
 		State:       state,
-		PipelineID:  p.getLatestPipelineID(rmd),
+		PipelineID:  p.getLatestPipelineID(ctx, rmd),
 	}
 
 	log.Debug().Interface("new_status", status).Msg("updating Gitlab commit status")
 	cs, err := p.client.SetCommitStatus(
+		ctx,
 		rmd.GetMRProjectNameWithNamespace(),
 		rmd.GetCommitSHA(),
 		&GitlabCommitStatusOptions{status},
@@ -131,8 +140,8 @@ func runUrlForTFRunMetadata(rmd runstream.RunMetadata) *string {
 	))
 }
 
-func (p *RunStatusUpdater) getLatestPipelineID(rmd runstream.RunMetadata) *int {
-	pipelines, err := p.client.GetPipelinesForCommit(rmd.GetMRProjectNameWithNamespace(), rmd.GetCommitSHA())
+func (p *RunStatusUpdater) getLatestPipelineID(ctx context.Context, rmd runstream.RunMetadata) *int {
+	pipelines, err := p.client.GetPipelinesForCommit(ctx, rmd.GetMRProjectNameWithNamespace(), rmd.GetCommitSHA())
 	if err != nil {
 		log.Error().Err(err).Msg("could not retrieve pipelines for commit")
 		return nil

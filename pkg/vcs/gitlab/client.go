@@ -1,6 +1,7 @@
 package gitlab
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/url"
@@ -11,6 +12,7 @@ import (
 	"github.com/rs/zerolog/log"
 	"github.com/zapier/tfbuddy/pkg/utils"
 	"github.com/zapier/tfbuddy/pkg/vcs"
+	"go.opentelemetry.io/otel"
 
 	gogitlab "github.com/xanzy/go-gitlab"
 )
@@ -56,7 +58,10 @@ func NewGitlabClient() *GitlabClient {
 
 	return &GitlabClient{glClient, token, tokenUser}
 }
-func (c *GitlabClient) ResolveMergeRequestDiscussion(projectWithNamespace string, mrIID int, discussionID string) error {
+func (c *GitlabClient) ResolveMergeRequestDiscussion(ctx context.Context, projectWithNamespace string, mrIID int, discussionID string) error {
+	_, span := otel.Tracer("TFC").Start(ctx, "ResolveMergeRequestDiscussion")
+	defer span.End()
+
 	return backoff.Retry(func() error {
 		_, _, err := c.client.Discussions.ResolveMergeRequestDiscussion(projectWithNamespace, mrIID, discussionID, &gogitlab.ResolveMergeRequestDiscussionOptions{Resolved: gogitlab.Bool(true)})
 		return utils.CreatePermanentError(err)
@@ -94,13 +99,19 @@ func (gS *GitlabCommitStatus) Info() string {
 	return fmt.Sprintf("%s %s %s", gS.Author.Username, gS.Name, gS.SHA)
 }
 
-func (c *GitlabClient) SetCommitStatus(projectWithNS string, commitSHA string, status vcs.CommitStatusOptions) (vcs.CommitStatus, error) {
+func (c *GitlabClient) SetCommitStatus(ctx context.Context, projectWithNS string, commitSHA string, status vcs.CommitStatusOptions) (vcs.CommitStatus, error) {
+	_, span := otel.Tracer("TFC").Start(ctx, "SetCommitStatus")
+	defer span.End()
+
 	return backoff.RetryWithData(func() (vcs.CommitStatus, error) {
 		commitStatus, _, err := c.client.Commits.SetCommitStatus(projectWithNS, commitSHA, status.(*GitlabCommitStatusOptions).SetCommitStatusOptions)
 		return &GitlabCommitStatus{commitStatus}, utils.CreatePermanentError(err)
 	}, createBackOffWithRetries())
 }
-func (c *GitlabClient) GetCommitStatuses(projectID, commitSHA string) []*gogitlab.CommitStatus {
+func (c *GitlabClient) GetCommitStatuses(ctx context.Context, projectID, commitSHA string) []*gogitlab.CommitStatus {
+	_, span := otel.Tracer("TFC").Start(ctx, "GetCommitStatuses")
+	defer span.End()
+
 	statuses, _, err := c.client.Commits.GetCommitStatuses(projectID, commitSHA, &gogitlab.GetCommitStatusesOptions{Stage: &glExternalStageName})
 	if err != nil {
 		log.Fatal().Msgf("could not get commit statuses: %v\n", err)
@@ -110,7 +121,10 @@ func (c *GitlabClient) GetCommitStatuses(projectID, commitSHA string) []*gogitla
 }
 
 // CreateMergeRequestComment creates a comment on the merge request.
-func (c *GitlabClient) CreateMergeRequestComment(mrIID int, projectID, comment string) error {
+func (c *GitlabClient) CreateMergeRequestComment(ctx context.Context, mrIID int, projectID, comment string) error {
+	_, span := otel.Tracer("TFC").Start(ctx, "CreateMergeRequestComment")
+	defer span.End()
+
 	if comment != "" {
 		return backoff.Retry(func() error {
 			log.Debug().Str("projectID", projectID).Int("mrIID", mrIID).Msg("posting Gitlab comment")
@@ -144,7 +158,10 @@ func (gn *GitlabMRNote) GetNoteID() int64 {
 	return int64(gn.Note.ID)
 }
 
-func (c *GitlabClient) CreateMergeRequestDiscussion(mrIID int, project, comment string) (vcs.MRDiscussionNotes, error) {
+func (c *GitlabClient) CreateMergeRequestDiscussion(ctx context.Context, mrIID int, project, comment string) (vcs.MRDiscussionNotes, error) {
+	_, span := otel.Tracer("TFC").Start(ctx, "CreateMergeRequestDiscussion")
+	defer span.End()
+
 	if comment == "" {
 		return nil, errors.New("comment is empty")
 	}
@@ -157,7 +174,10 @@ func (c *GitlabClient) CreateMergeRequestDiscussion(mrIID int, project, comment 
 	}, createBackOffWithRetries())
 }
 
-func (c *GitlabClient) UpdateMergeRequestDiscussionNote(mrIID, noteID int, project, discussionID, comment string) (vcs.MRNote, error) {
+func (c *GitlabClient) UpdateMergeRequestDiscussionNote(ctx context.Context, mrIID, noteID int, project, discussionID, comment string) (vcs.MRNote, error) {
+	_, span := otel.Tracer("TFC").Start(ctx, "UpdateMergeRequestDiscussionNote")
+	defer span.End()
+
 	if comment == "" {
 		return nil, utils.CreatePermanentError(errors.New("comment is empty"))
 	}
@@ -176,7 +196,10 @@ func (c *GitlabClient) UpdateMergeRequestDiscussionNote(mrIID, noteID int, proje
 }
 
 // AddMergeRequestDiscussionReply creates a comment on the merge request.
-func (c *GitlabClient) AddMergeRequestDiscussionReply(mrIID int, project, discussionID, comment string) (vcs.MRNote, error) {
+func (c *GitlabClient) AddMergeRequestDiscussionReply(ctx context.Context, mrIID int, project, discussionID, comment string) (vcs.MRNote, error) {
+	_, span := otel.Tracer("TFC").Start(ctx, "AddMergeRequestDiscussionReply")
+	defer span.End()
+
 	if comment != "" {
 		return backoff.RetryWithData(func() (vcs.MRNote, error) {
 			log.Debug().Str("project", project).Int("mrIID", mrIID).Msg("posting Gitlab discussion reply")
@@ -189,7 +212,10 @@ func (c *GitlabClient) AddMergeRequestDiscussionReply(mrIID int, project, discus
 }
 
 // ResolveMergeRequestDiscussionReply marks a discussion thread as resolved /  unresolved.
-func (c *GitlabClient) ResolveMergeRequestDiscussionReply(mrIID int, project, discussionID string, resolved bool) error {
+func (c *GitlabClient) ResolveMergeRequestDiscussionReply(ctx context.Context, mrIID int, project, discussionID string, resolved bool) error {
+	_, span := otel.Tracer("TFC").Start(ctx, "ResolveMergeRequestDiscussionReply")
+	defer span.End()
+
 	return backoff.Retry(func() error {
 		log.Debug().Str("project", project).Int("mrIID", mrIID).Msg("posting Gitlab discussion reply")
 		_, _, err := c.client.Discussions.ResolveMergeRequestDiscussion(project, mrIID, discussionID, &gogitlab.ResolveMergeRequestDiscussionOptions{Resolved: gogitlab.Bool(resolved)})
@@ -198,7 +224,10 @@ func (c *GitlabClient) ResolveMergeRequestDiscussionReply(mrIID int, project, di
 }
 
 // GetRepoFile retrieves a single file from a Gitlab repository using the RepositoryFiles API
-func (g *GitlabClient) GetRepoFile(project, file, ref string) ([]byte, error) {
+func (g *GitlabClient) GetRepoFile(ctx context.Context, project, file, ref string) ([]byte, error) {
+	_, span := otel.Tracer("TFC").Start(ctx, "GetRepoFile")
+	defer span.End()
+
 	if ref == "" {
 		ref = "HEAD"
 	}
@@ -210,7 +239,10 @@ func (g *GitlabClient) GetRepoFile(project, file, ref string) ([]byte, error) {
 
 // GetMergeRequestModifiedFiles returns the names of files that were modified in the merge request
 // relative to the repo root, e.g. parent/child/file.txt.
-func (g *GitlabClient) GetMergeRequestModifiedFiles(mrIID int, projectID string) ([]string, error) {
+func (g *GitlabClient) GetMergeRequestModifiedFiles(ctx context.Context, mrIID int, projectID string) ([]string, error) {
+	_, span := otel.Tracer("TFC").Start(ctx, "GetMergeRequestModifiedFiles")
+	defer span.End()
+
 	const maxPerPage = 100
 	return backoff.RetryWithData(func() ([]string, error) {
 		var files []string
@@ -284,8 +316,13 @@ type GitlabMRAuthor struct {
 func (ga *GitlabMRAuthor) GetUsername() string {
 	return ga.Username
 }
-func (g *GitlabClient) GetMergeRequest(mrIID int, project string) (vcs.DetailedMR, error) {
+func (g *GitlabClient) GetMergeRequest(ctx context.Context, mrIID int, project string) (vcs.DetailedMR, error) {
+	ctx, span := otel.Tracer("hooks").Start(ctx, "GetMergeRequest")
+	defer span.End()
+
 	return backoff.RetryWithData(func() (vcs.DetailedMR, error) {
+		_, span := otel.Tracer("hooks").Start(ctx, "GetMergeRequest")
+		defer span.End()
 		mr, _, err := g.client.MergeRequests.GetMergeRequest(
 			project,
 			mrIID,
@@ -309,7 +346,10 @@ type GitlabMRApproval struct {
 func (gm *GitlabMRApproval) IsApproved() bool {
 	return gm.Approved
 }
-func (g *GitlabClient) GetMergeRequestApprovals(mrIID int, project string) (vcs.MRApproved, error) {
+func (g *GitlabClient) GetMergeRequestApprovals(ctx context.Context, mrIID int, project string) (vcs.MRApproved, error) {
+	_, span := otel.Tracer("TFC").Start(ctx, "GetMergeRequestApprovals")
+	defer span.End()
+
 	return backoff.RetryWithData(func() (vcs.MRApproved, error) {
 		approvals, _, err := g.client.MergeRequestApprovals.GetConfiguration(
 			project,
@@ -332,7 +372,10 @@ func (gP *GitlabPipeline) GetSource() string {
 func (gP *GitlabPipeline) GetID() int {
 	return gP.ID
 }
-func (g *GitlabClient) GetPipelinesForCommit(project, commitSHA string) ([]vcs.ProjectPipeline, error) {
+func (g *GitlabClient) GetPipelinesForCommit(ctx context.Context, project, commitSHA string) ([]vcs.ProjectPipeline, error) {
+	_, span := otel.Tracer("TFC").Start(ctx, "GetPipelinesForCommit")
+	defer span.End()
+
 	return backoff.RetryWithData(func() ([]vcs.ProjectPipeline, error) {
 		pipelines, _, err := g.client.Pipelines.ListProjectPipelines(project, &gogitlab.ListProjectPipelinesOptions{
 			SHA: gogitlab.String(commitSHA),

@@ -1,9 +1,11 @@
 package gitlab
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/zapier/tfbuddy/pkg/comment_formatter"
+	"go.opentelemetry.io/otel"
 
 	"github.com/hashicorp/go-tfe"
 	"github.com/rs/zerolog/log"
@@ -11,11 +13,14 @@ import (
 	"github.com/zapier/tfbuddy/pkg/runstream"
 )
 
-func (p *RunStatusUpdater) postRunStatusComment(run *tfe.Run, rmd runstream.RunMetadata) {
+func (p *RunStatusUpdater) postRunStatusComment(ctx context.Context, run *tfe.Run, rmd runstream.RunMetadata) {
+	ctx, span := otel.Tracer("TFC").Start(ctx, "postRunStatusComment")
+	defer span.End()
 
 	commentBody, topLevelNoteBody, resolveDiscussion := comment_formatter.FormatRunStatusCommentBody(p.tfc, run, rmd)
 
 	if _, err := p.client.UpdateMergeRequestDiscussionNote(
+		ctx,
 		rmd.GetMRInternalID(),
 		int(rmd.GetRootNoteID()),
 		rmd.GetMRProjectNameWithNamespace(),
@@ -26,7 +31,7 @@ func (p *RunStatusUpdater) postRunStatusComment(run *tfe.Run, rmd runstream.RunM
 	}
 
 	if commentBody != "" {
-		p.postComment(fmt.Sprintf(
+		p.postComment(ctx, fmt.Sprintf(
 			"Status: `%s`<br>%s",
 			run.Status,
 			commentBody),
@@ -39,6 +44,7 @@ func (p *RunStatusUpdater) postRunStatusComment(run *tfe.Run, rmd runstream.RunM
 	if resolveDiscussion {
 
 		err := p.client.ResolveMergeRequestDiscussion(
+			ctx,
 			rmd.GetMRProjectNameWithNamespace(),
 			rmd.GetMRInternalID(),
 			rmd.GetDiscussionID(),
@@ -49,37 +55,27 @@ func (p *RunStatusUpdater) postRunStatusComment(run *tfe.Run, rmd runstream.RunM
 	}
 }
 
-func (p *RunStatusUpdater) postComment(commentBody, projectID string, mrIID int, discussionID string) error {
+func (p *RunStatusUpdater) postComment(ctx context.Context, commentBody, projectID string, mrIID int, discussionID string) error {
+	ctx, span := otel.Tracer("TFC").Start(ctx, "postComment")
+	defer span.End()
+
 	content := fmt.Sprintf(MR_COMMENT_FORMAT, commentBody)
 
 	if discussionID != "" {
-		_, err := p.client.AddMergeRequestDiscussionReply(mrIID, projectID, discussionID, content)
+		_, err := p.client.AddMergeRequestDiscussionReply(ctx, mrIID, projectID, discussionID, content)
 		if err != nil {
 			log.Error().Err(err).Msg("error posting Gitlab discussion reply")
 			return err
 		}
 		return nil
 	} else {
-		err := p.client.CreateMergeRequestComment(mrIID, projectID, content)
+		err := p.client.CreateMergeRequestComment(ctx, mrIID, projectID, content)
 		if err != nil {
 			log.Error().Err(err).Msg("error posting Gitlab comment to MR")
 			return err
 		}
 		return nil
 	}
-}
-
-func hasChanges(plan *tfe.Plan) bool {
-	if plan.ResourceAdditions > 0 {
-		return true
-	}
-	if plan.ResourceDestructions > 0 {
-		return true
-	}
-	if plan.ResourceChanges > 0 {
-		return true
-	}
-	return false
 }
 
 const MR_COMMENT_FORMAT = `
